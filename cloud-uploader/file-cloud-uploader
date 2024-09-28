@@ -1,0 +1,173 @@
+#!/bin/bash
+#
+# Uploads files to an Azure Storage Blob container
+
+source ./config
+
+err() {
+  echo "$*" >&2
+}
+
+search_file() {
+  local file_to_search="$1"
+  local directory basefilename
+  
+  if echo "${file_to_search}" | grep -q "/"; then
+    directory="${file_to_search%/*}"
+    basefilename="${file_to_search##*/}"
+  else
+    directory="$HOME"
+    basefilename="${file_to_search}"
+  fi
+
+  find "${directory}" -type f -name "${basefilename}" 2>/dev/null
+}
+
+display_files() {
+  local i=0
+  echo
+  for file in "$@"; do
+    echo "$(( i+1 )): ${file}"
+    i=$(( i+1 ))
+  done
+}
+
+upload_file_processing() {
+  local file_to_upload="$1"
+
+  echo
+  echo "You have selected: ${file_to_upload}"
+  read -p "Would you like to continue (Y/N)? " upload_choice
+  if [[ "${upload_choice,,}" == 'y' ]]; then
+    echo "Uploading file..."
+    upload_file "${file_to_upload}"
+  else
+    echo "Aborting upload..."
+  fi
+}
+
+wait_for_output_file() {
+  local file="$1"
+  local max_attempts=10
+  local attempt=0
+
+  while [[ ! -s "${file}" ]] && (( attempt < max_attempts )); do
+    sleep 1
+    ((attempt++))
+  done
+
+  if [[ ! -s "${file}" ]]; then
+    return 1
+  fi
+}
+
+upload_blob() {
+  local file_to_upload="$1"
+  local overwrite="$2"
+  local output_file="$3"
+
+  az storage blob upload \
+    --account-name "${ACCT_NAME}" \
+    --account-key "${KEY}" \
+    --container-name "${CONTAINER_NAME}" \
+    --file "${file_to_upload}" \
+    --overwrite ${overwrite} \
+    --name "${file_to_upload##*/}" &> "${output_file}"
+}
+
+blob_already_exists_error() {
+  local file_to_upload="$1"
+  local overwrite="true"
+  local output_file="output.txt"
+
+  read -p 'The file already exists. Overwrite (Y/N)? ' rewrite
+  if [[ "${rewrite,,}" == 'y' ]]; then
+    upload_blob "${file_to_upload}" "${overwrite}" "${output_file}"
+
+    if ! wait_for_output_file "${output_file}"; then
+      err "Output file does not exist." >&2
+      return 1
+    elif grep -qi "error" "${output_file}"; then
+      err 'An error occurred during the overwrite.'
+    else
+      echo "File overwritten."
+      rm "${output_file}"
+    fi
+  else
+    echo "File not overwritten."
+  fi
+}
+
+upload_file() {
+  local file_to_upload="$1"
+  local overwrite="false"
+  local output_file="output.txt"
+
+  does_storage_acct_exist=$(az storage account check-name \
+    --name "${ACCT_NAME}" \
+    --query [nameAvailable] \
+    -o tsv)
+  
+  if [[ "${does_storage_acct_exist}" == "true" ]]; then
+    err "Storage account ${ACCT_NAME} does not exist."
+    return 1
+  fi 
+
+  upload_blob "${file_to_upload}" "${overwrite}" "${output_file}"
+
+  if ! wait_for_output_file "${output_file}"; then
+    err "Output file does not exist." >&2
+    return 1
+  elif grep -qi "error" "${output_file}"; then
+    if grep -q "BlobAlreadyExists" "${output_file}"; then
+      blob_already_exists_error "${file_to_upload}"
+    else
+      err "An unexpected error occurred."
+    fi
+  else
+    echo 'File uploaded successfully.'
+    rm "${output_file}"
+  fi
+}
+
+get_specific_file() {
+  local number_of_files_found=$1
+  local file_number selected_file
+
+  while true; do
+    read -p "Input the file number you want to upload: " file_number
+    if [[ "${file_number}" =~ ^[0-9]+$ ]] && \
+       [[ "${file_number}" -ge 1 ]] && \
+       [[ "${file_number}" -le "${number_of_files_found}" ]]; then
+        selected_file=${found_files_array[$((file_number-1))]}
+        upload_file_processing "${selected_file}"
+        break
+    else
+        echo "Invalid file number. Please enter a number between 1 and \
+        ${number_of_files_found}."
+    fi
+  done
+}
+
+if [[ $# -eq 1 ]]; then
+
+  filename="$1"
+  found_files=$(search_file "${filename}")
+
+  if [ -n "${found_files}" ]; then
+    mapfile -t found_files_array <<< "${found_files}"
+    length=${#found_files_array[@]}
+
+    if [[ "${length}" -eq 1 ]]; then
+      selected_file=${found_files_array[0]}
+      upload_file_processing "${selected_file}"
+    elif [[ "${length}" -gt 1 ]]; then
+      display_files ${found_files_array[@]}
+      get_specific_file "${length}" 
+    fi
+  else
+    err "No file was found."
+  fi
+else
+  err "Expected a file name/path to be provided."
+fi
