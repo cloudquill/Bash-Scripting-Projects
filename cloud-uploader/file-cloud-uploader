@@ -4,6 +4,8 @@
 
 source ./config
 
+readonly OUTPUT_FILE="output.txt"
+
 err() {
   echo "$*" >&2
 }
@@ -35,73 +37,107 @@ display_files() {
 upload_file_processing() {
   local file_to_upload="$1"
 
-  echo
-  echo "You have selected: ${file_to_upload}"
-  read -p "Would you like to continue (Y/N)? " upload_choice
+  printf "\nYou have selected: ${file_to_upload} \n"
+  read -p "Would you like to continue? (Y/N): " upload_choice
   if [[ "${upload_choice,,}" == 'y' ]]; then
     echo "Uploading file..."
-    upload_file "${file_to_upload}"
+    upload_file "${file_to_upload}" ""
   else
     echo "Aborting upload..."
   fi
 }
 
 wait_for_output_file() {
-  local file="$1"
   local max_attempts=10
   local attempt=0
 
-  while [[ ! -s "${file}" ]] && (( attempt < max_attempts )); do
+  while [[ ! -s "${OUTPUT_FILE}" ]] && (( attempt < max_attempts )); do
     sleep 1
     ((attempt++))
   done
 
-  if [[ ! -s "${file}" ]]; then
+  if [[ ! -s "${OUTPUT_FILE}" ]]; then
     return 1
   fi
 }
 
+spinner() {
+  local pid="$1"
+  local spin='-\|/'
+  local i=0
+
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$(( (i+1) % 4 ))
+    printf "\r${spin:$i:1}"
+    sleep 0.1
+  done
+  
+  printf "\r"
+}
+
 upload_blob() {
   local file_to_upload="$1"
-  local overwrite="$2"
-  local output_file="$3"
-
+  local filename="$2"
+  local overwrite="$3"
+  
   az storage blob upload \
     --account-name "${ACCT_NAME}" \
     --account-key "${KEY}" \
     --container-name "${CONTAINER_NAME}" \
     --file "${file_to_upload}" \
-    --overwrite ${overwrite} \
-    --name "${file_to_upload##*/}" &> "${output_file}"
+    --overwrite "${overwrite}" \
+    --name "${filename}" &> "${OUTPUT_FILE}" &
+
+  pid=$! # Process ID of the previous running command
+  spinner "${pid}"
 }
 
 blob_already_exists_error() {
   local file_to_upload="$1"
-  local overwrite="true"
-  local output_file="output.txt"
+  local operation_type
 
-  read -p 'The file already exists. Overwrite (Y/N)? ' rewrite
-  if [[ "${rewrite,,}" == 'y' ]]; then
-    upload_blob "${file_to_upload}" "${overwrite}" "${output_file}"
+  read -p 'The file already exists. Overwrite or rename it? (O/R): ' file_overwrite_action
+  if [[ "${file_overwrite_action,,}" == 'o' ]]; then
+    operation_type="overwrite"
 
-    if ! wait_for_output_file "${output_file}"; then
-      err "Output file does not exist." >&2
-      return 1
-    elif grep -qi "error" "${output_file}"; then
-      err 'An error occurred during the overwrite.'
+    upload_file "${file_to_upload}" "${operation_type}" ""
+  elif [[ "${file_overwrite_action,,}" == 'r' ]]; then
+    operation_type="rename"
+
+    read -p "New file name: " new_filename
+    upload_file "${file_to_upload}" "${operation_type}" "${new_filename}"
+  fi
+}
+
+handle_error() {
+  local file_to_upload="$1"
+  
+  if ! wait_for_output_file "${OUTPUT_FILE}"; then
+    err "Output file does not exist."
+    return 1
+  elif grep -qi "error" "${OUTPUT_FILE}"; then
+    if grep -q "BlobAlreadyExists" "${OUTPUT_FILE}"; then
+      blob_already_exists_error "${file_to_upload}"
     else
-      echo "File overwritten."
-      rm "${output_file}"
+      err "An unexpected error occurred."
     fi
   else
-    echo "File not overwritten."
+    echo 'File uploaded successfully.'
+    rm "${OUTPUT_FILE}"
   fi
 }
 
 upload_file() {
   local file_to_upload="$1"
   local overwrite="false"
-  local output_file="output.txt"
+  local operation_type="$2"
+  local filename="${file_to_upload##*/}"
+  
+  if [[ "${operation_type}" == "rename" ]]; then
+    filename="$3"
+  elif [[ "${operation_type}" == "overwrite" ]]; then
+    overwrite="true"
+  fi
 
   does_storage_acct_exist=$(az storage account check-name \
     --name "${ACCT_NAME}" \
@@ -111,27 +147,15 @@ upload_file() {
   if [[ "${does_storage_acct_exist}" == "true" ]]; then
     err "Storage account ${ACCT_NAME} does not exist."
     return 1
-  fi 
-
-  upload_blob "${file_to_upload}" "${overwrite}" "${output_file}"
-
-  if ! wait_for_output_file "${output_file}"; then
-    err "Output file does not exist." >&2
-    return 1
-  elif grep -qi "error" "${output_file}"; then
-    if grep -q "BlobAlreadyExists" "${output_file}"; then
-      blob_already_exists_error "${file_to_upload}"
-    else
-      err "An unexpected error occurred."
-    fi
-  else
-    echo 'File uploaded successfully.'
-    rm "${output_file}"
   fi
+
+  upload_blob "${file_to_upload}" "${filename}" "${overwrite}"
+
+  handle_error "${file_to_upload}"
 }
 
 get_specific_file() {
-  local number_of_files_found=$1
+  local number_of_files_found="$1"
   local file_number selected_file
 
   while true; do
@@ -149,25 +173,29 @@ get_specific_file() {
   done
 }
 
-if [[ $# -eq 1 ]]; then
+main() {
+  if [[ ! -n "$1" ]]; then
+    err "Expected a file name/path to be provided."
+    return 1
+  fi
 
   filename="$1"
   found_files=$(search_file "${filename}")
 
-  if [ -n "${found_files}" ]; then
+  if [[ -n "${found_files}" ]]; then
     mapfile -t found_files_array <<< "${found_files}"
     length=${#found_files_array[@]}
 
     if [[ "${length}" -eq 1 ]]; then
-      selected_file=${found_files_array[0]}
+      selected_file="${found_files_array[0]}"
       upload_file_processing "${selected_file}"
-    elif [[ "${length}" -gt 1 ]]; then
-      display_files ${found_files_array[@]}
+    else
+      display_files "${found_files_array[@]}"
       get_specific_file "${length}" 
     fi
   else
     err "No file was found."
   fi
-else
-  err "Expected a file name/path to be provided."
-fi
+}
+
+main "$1"
