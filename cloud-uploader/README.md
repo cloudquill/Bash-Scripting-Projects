@@ -25,7 +25,20 @@ A bash-based CLI tool for uploading files to Azure Storage. This tool offers a s
 
 4. **Fill the service principal details in the config file.**
 
-5. **Fill the storage account and container details in the config file.**
+5. **Create a storage account and container and fill the details in the config file.**
+
+6. **Assign the Storage Blob Data Contributor role to Service Principal**:
+   - Get the service principal object ID
+     ```bash
+     az ad sp list --display-name <sp-name> --query "[].id" --output tsv
+     ```
+   - Assign the role to the service principal at the storage account level
+     ```bash
+     az role assignment create \
+     --assignee <sp-id> \
+     --role "Storage Blob Data Contributor" \
+     --scope /subscriptions/<subscription-id>/resourceGroups/<resource-group-id>/providers/Microsoft.Storage/storageAccounts/<storage-account-name>
+     ```
 
 ## Usage
 

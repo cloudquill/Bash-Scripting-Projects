@@ -1,0 +1,12 @@
+#!/bin/bash
+#
+# Configuration file for service principal and storage account
+
+# Service principal authentication details
+export APP_ID="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export PASSWORD="xxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export TENANT_ID="xxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Storage account details
+export ACCT_NAME="xxxxxxxxxxxxxx"
+export CONTAINER_NAME="xxxxxxxxxxxxxx"
